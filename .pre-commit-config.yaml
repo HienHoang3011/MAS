@@ -1,0 +1,77 @@
+minimum_pre_commit_version: "3.5.0"
+
+default_language_version:
+  python: python3.12
+
+default_stages: [pre-commit]
+
+repos:
+  # 1) Format + Lint
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.12
+    hooks:
+      - id: ruff-format
+        name: ruff-format (formatter duy nhất)
+        types: [python]
+        exclude: |
+          (^migrations/)|(^data/)|(^build/)|(^dist/)|(^.venv/)|(^venv/)|(^logs/)
+      - id: ruff
+        name: ruff (lint + --fix)
+        args: ["--fix"]
+        types: [python]
+        exclude: |
+          (^migrations/)|(^data/)|(^build/)|(^dist/)|(^.venv/)|(^venv/)|(^logs/)
+
+  # 2) Hooks vệ sinh cơ bản
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: mixed-line-ending
+
+  # 3) Strip metadata notebooks
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout
+        types: [jupyter]
+        stages: [pre-commit]
+
+  # 4) Secret scanning (pre-push)
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        stages: [pre-push]
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: |
+          (^tests?/fixtures/)|(^data/)|(^assets/)
+
+  # 5) Type-check & test (pre-push)
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.17.1
+    hooks:
+      - id: mypy
+        name: mypy (pre-push)
+        stages: [pre-push]
+        args: ["--pretty", "--cache-dir=.mypy_cache", "app", "src"]
+        additional_dependencies:
+          - pydantic>=2
+          - types-requests
+        exclude: |
+          (^migrations/)|(^tests?/fixtures/)
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest (quick, pre-push)
+        entry: bash -c "pytest -q"
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+        types: [python]
