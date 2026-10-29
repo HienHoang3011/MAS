@@ -72,8 +72,12 @@ class ProxyStructuredLLM:
                 {
                     "role": "system",
                     "content": system
-                    + "\nReturn exactly one compact JSON object matching this schema. "
-                    "No Markdown, commentary, or trailing text. Stop after the closing brace: "
+                    + "\nReturn exactly one compact JSON INSTANCE with values derived from the "
+                    "user input. "
+                    "Use the schema property names as response keys. Do not copy schema metadata "
+                    "such as properties, required, title, type or $defs into the response. "
+                    "No Markdown or commentary. Stop after the closing brace. "
+                    "The following schema describes the format; it is not the response: "
                     + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
                 },
                 {"role": "user", "content": user},
