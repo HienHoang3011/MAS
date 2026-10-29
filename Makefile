@@ -1,6 +1,6 @@
 UV=uv
 
-.PHONY: setup sync run dev lint format type test hooks hooks-strict hooks-update clean
+.PHONY: setup sync run dev lint format type test index-knowledge hooks hooks-strict hooks-update clean
 
 setup:
 	$(UV) sync --extra dev
@@ -26,6 +26,9 @@ type:
 
 test:
 	$(UV) run --extra dev pytest
+
+index-knowledge:
+	$(UV) run python -m scripts.index_knowledge
 
 # Auto-fix formatting (lenient mode)
 hooks:

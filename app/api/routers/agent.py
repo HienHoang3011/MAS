@@ -11,7 +11,7 @@ from app.core.models.agent import AgentSession
 from app.core.use_cases.agent_system import AgentSystem, InvalidSessionStateError
 from app.infra.clients.context_search import ContextSearchTool
 from app.infra.db.agent_sessions import InMemorySessionStore, SessionNotFoundError
-from app.services.llm_service import OpenAIStructuredLLM
+from app.services.llm_service import build_llm
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -28,23 +28,15 @@ class ReplyRequest(BaseModel):
 @lru_cache(maxsize=1)
 def _build_agent_system() -> AgentSystem:
     settings = get_settings()
-    if settings.llm_provider == "gemini":
-        api_key = settings.gemini_api_key
-        model = settings.gemini_model
-        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-        key_name = "GEMINI_API_KEY"
-    else:
-        api_key = settings.openai_api_key
-        model = settings.openai_model
-        base_url = None
-        key_name = "OPENAI_API_KEY"
-    if not api_key:
+    try:
+        llm = build_llm(settings)
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"{key_name} is not configured",
-        )
+            detail=str(exc),
+        ) from exc
     return AgentSystem(
-        llm=OpenAIStructuredLLM(api_key, model, base_url=base_url),
+        llm=llm,
         store=InMemorySessionStore(),
         tools=[ContextSearchTool()],
         max_clarifications=settings.agent_max_clarifications,

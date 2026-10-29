@@ -1,9 +1,10 @@
 from fastapi import APIRouter
 
-from app.api.routers import agent
+from app.api.routers import agent, chat
 
 router = APIRouter()
 router.include_router(agent.router)
+router.include_router(chat.router)
 
 
 @router.get("/")
