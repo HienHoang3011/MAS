@@ -133,7 +133,7 @@ class AgentSystemTests(IsolatedAsyncioTestCase):
         with self.assertRaises(IndexError):
             await system.reply(initial.id, "The missing detail")
 
-        restored = system.get(initial.id)
+        restored = await system.get(initial.id)
         self.assertEqual(restored.question.question, "Which detail?")
         self.assertEqual(restored.clarification_count, 0)
         self.assertEqual(len(restored.turns), len(initial.turns))

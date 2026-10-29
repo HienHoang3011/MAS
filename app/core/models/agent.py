@@ -64,6 +64,7 @@ class FinalAnswer(BaseModel):
 
 class AgentSession(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
+    revision: int = Field(default=0, ge=0)
     problem: str
     context: str = ""
     status: SessionStatus = SessionStatus.WAITING_FOR_USER

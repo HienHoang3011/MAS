@@ -16,7 +16,7 @@ from app.core.models.agent import (
 )
 from app.core.ports.llm import StructuredLLM
 from app.core.ports.tools import AgentTool
-from app.infra.db.agent_sessions import InMemorySessionStore
+from app.infra.db.agent_sessions import AgentSessionStore
 
 
 class InvalidSessionStateError(Exception):
@@ -29,7 +29,7 @@ class AgentSystem:
     def __init__(
         self,
         llm: StructuredLLM,
-        store: InMemorySessionStore,
+        store: AgentSessionStore,
         tools: list[AgentTool] | None = None,
         max_clarifications: int = 3,
         max_executions: int = 2,
@@ -41,34 +41,27 @@ class AgentSystem:
         self._max_executions = max_executions
 
     async def start(self, problem: str, context: str = "") -> AgentSession:
-        session = self._store.create(problem, context)
+        session = AgentSession(problem=problem, context=context)
         session.turns.append(Turn(role="user", content=problem))
-        try:
-            async with self._store.lock(session.id):
-                await self._advance(session)
-                return session.model_copy(deep=True)
-        except Exception:
-            self._store.delete(session.id)
-            raise
+        await self._advance(session)
+        await self._store.create(session)
+        return session.model_copy(deep=True)
 
     async def reply(self, session_id: str, answer: str) -> AgentSession:
-        async with self._store.lock(session_id):
-            session = self._store.get(session_id)
-            if session.status != SessionStatus.WAITING_FOR_USER or session.question is None:
-                raise InvalidSessionStateError("This session is not waiting for an answer")
-            previous = session.model_copy(deep=True)
-            try:
-                session.turns.append(Turn(role="user", content=answer))
-                session.clarification_count += 1
-                session.question = None
-                await self._advance(session)
-                return session.model_copy(deep=True)
-            except Exception:
-                self._store.replace(previous)
-                raise
+        session = await self._store.get(session_id)
+        if session.status != SessionStatus.WAITING_FOR_USER or session.question is None:
+            raise InvalidSessionStateError("This session is not waiting for an answer")
+        expected_revision = session.revision
+        session.turns.append(Turn(role="user", content=answer))
+        session.clarification_count += 1
+        session.question = None
+        await self._advance(session)
+        session.revision += 1
+        await self._store.replace(session, expected_revision)
+        return session.model_copy(deep=True)
 
-    def get(self, session_id: str) -> AgentSession:
-        return self._store.get(session_id).model_copy(deep=True)
+    async def get(self, session_id: str) -> AgentSession:
+        return await self._store.get(session_id)
 
     def _input(self, session: AgentSession, **extra: object) -> str:
         return json.dumps(

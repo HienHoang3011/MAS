@@ -8,7 +8,10 @@ from pymongo import AsyncMongoClient
 from app.api.routers import health, v1
 from app.config.config import Settings
 from app.config.logging import configure_logging
+from app.core.use_cases.agent_system import AgentSystem
 from app.core.use_cases.chat_system import ChatSystem
+from app.infra.clients.context_search import ContextSearchTool
+from app.infra.db.agent_sessions import MongoAgentSessionStore
 from app.infra.db.chat_store import MongoChatStore
 from app.services.embedding_service import BgeM3Embedder
 from app.services.llm_service import build_llm
@@ -33,6 +36,15 @@ def create_app() -> FastAPI:
         try:
             store = MongoChatStore(client, settings.mongodb_database)
             await store.initialize()
+            agent_store = MongoAgentSessionStore(client, settings.mongodb_database)
+            await agent_store.initialize()
+            app.state.agent_system = AgentSystem(
+                llm,
+                agent_store,
+                tools=[ContextSearchTool()],
+                max_clarifications=settings.agent_max_clarifications,
+                max_executions=settings.agent_max_executions,
+            )
             system = ChatSystem(
                 llm,
                 store,

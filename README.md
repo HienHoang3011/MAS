@@ -1,39 +1,81 @@
-# MAS — agent trò chuyện và hướng dẫn học lý thuyết đồ thị
+# MAS — API trợ giảng lý thuyết đồ thị
 
-API FastAPI gồm các agent định tuyến, trò chuyện/gia sư, truy xuất giáo trình, kiểm tra câu trả lời và tóm tắt bộ nhớ. Luồng mới dùng Qwen qua proxy tương thích OpenAI; tiếp tục hỗ trợ cấu hình Gemini/OpenAI hiện có.
+MAS là dịch vụ FastAPI cho ứng dụng học lý thuyết đồ thị. Client gửi tin nhắn tới `/v1/chat`; hệ thống chọn cách trả lời theo mục đích của người học, lưu hội thoại trong MongoDB và dùng giáo trình đã đánh chỉ mục khi cần. Mặc định dự án dùng Qwen qua proxy tương thích OpenAI; cũng có cấu hình cho OpenAI và Gemini.
 
-- **Trò chuyện:** phản hồi tự nhiên, sử dụng ngữ cảnh hội thoại.
-- **Hỏi bài:** gợi ý cách tiếp cận, giải thích phương pháp và hỏi bước tiếp theo; không đưa đáp án cuối, lời giải hoàn chỉnh hay xác nhận một đáp án được đề xuất.
-- **Hỏi lý thuyết:** dùng BGE-M3 để lấy các đoạn liên quan trong giáo trình MongoDB, giải thích khái niệm và dẫn nguồn.
-- **Review:** Replies are generated as plain text. A source-blind check reviews completeness; theory replies also receive a brief factual assessment per text block. Tutoring is checked for a useful method and next action, followed by a separate source and tutoring-policy audit. Coverage and factual checks reference indexed text blocks verified by the application. A rejected draft is rewritten once with its feedback; only an accepted reply is saved and returned. Exhausted checks return HTTP 502. These remain LLM judgments, not a correctness guarantee.
+| Loại yêu cầu | Cách phản hồi |
+| --- | --- |
+| Trò chuyện (`conversation`) | Trả lời tự nhiên, có dùng ngữ cảnh phiên. |
+| Hỏi bài (`tutoring`) | Gợi ý phương pháp và bước tiếp theo để người học tự làm; không đưa đáp án cuối, lời giải hoàn chỉnh hoặc xác nhận đáp án được đề xuất. |
+| Hỏi lý thuyết (`knowledge`) | Tìm đoạn liên quan trong giáo trình, giải thích khái niệm và dẫn nguồn. |
+
+## Luồng xử lý
+
+```mermaid
+flowchart TD
+    A[Client gửi POST /v1/chat] --> B[Tải phiên, 10 tin gần nhất và tối đa 5 tóm tắt]
+    B --> C[Agent định tuyến yêu cầu]
+    C -->|Trò chuyện| E[Tạo bản nháp]
+    C -->|Hỏi bài hoặc lý thuyết| D[BGE-M3 truy xuất giáo trình trong MongoDB]
+    D --> E
+    E --> F[Agent kiểm tra nội dung và giới hạn hướng dẫn]
+    F -->|Chưa đạt, còn lượt thử| E
+    F -->|Đạt| G[Lưu cặp tin nhắn vào MongoDB và trả lời]
+    G --> H[Worker nền tóm tắt tin cũ khi cần]
+```
+
+Phần kiểm tra đánh giá độ đầy đủ, tính đúng của câu trả lời lý thuyết, căn cứ từ nguồn và việc giữ đúng vai trò gia sư. Bản nháp không đạt được sửa tối đa một lần; nếu vẫn không đạt, API trả HTTP 502 và không lưu lượt chat đó. Đây là đánh giá bằng LLM, không phải bảo đảm toán học về tính đúng đắn.
+
+API `/v1/agent/sessions` là luồng agent cũ dùng `problem` và `context`. Client đã dùng API này có thể tiếp tục: phiên được lưu trong MongoDB và đọc được sau khi khởi động lại. Luồng `/v1/chat` là luồng chính cho trợ giảng, truy xuất giáo trình và bộ nhớ hội thoại.
+
+## Chuẩn bị
+
+- Python 3.12+ và `uv` để chạy tại máy; hoặc Docker nếu triển khai bằng image.
+- MongoDB Atlas hoặc MongoDB replica set để transaction lưu lượt chat hoạt động.
+- Một LLM đã cấu hình qua proxy, OpenAI hoặc Gemini.
+- Dữ liệu giáo trình ở collection MongoDB, mỗi đoạn có `chunk_id`, `source`, `heading_path`, `content`. Trò chuyện thông thường không cần chỉ mục, còn hỏi bài và hỏi lý thuyết cần chạy bước đánh chỉ mục bên dưới.
+- BGE-M3 tải vào `EMBEDDING_CACHE_DIR` trong lần dùng đầu tiên. Cần đủ dung lượng đĩa và quyền truy cập kho model khi chưa có cache.
 
 ## Chạy tại máy
 
-Yêu cầu Python 3.12+ và `uv`.
+Đặt file `.env` được cung cấp vào thư mục dự án, rồi chạy:
 
 ```bash
 uv sync --frozen --extra dev
-cp .env.example .env
-# Điền cấu hình proxy và MongoDB trong .env.
 make index-knowledge
 make run
 ```
 
-Nếu đã có `.env`, giữ cấu hình hiện có. `.env` được Git bỏ qua; không đưa credentials vào tài liệu hoặc mã nguồn. Swagger ở `http://127.0.0.1:2003/docs`.
+`make index-knowledge` cần làm trước khi dùng chức năng hỏi bài/lý thuyết. Nếu chỉ thử trò chuyện, có thể chạy server trước và đánh chỉ mục sau. API chạy tại `http://127.0.0.1:2003`, Swagger tại `http://127.0.0.1:2003/docs`, health check tại `GET /health/`.
 
-Các biến chính:
+## Chạy bằng Docker
 
-| Biến | Vai trò |
-| --- | --- |
-| `LLM_PROVIDER=proxy` | Dùng proxy Qwen |
-| `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_TIMEOUT` | Kết nối proxy; URL kết thúc bằng `/v1` |
-| `MONGODB_URI` | Kết nối MongoDB, cần hỗ trợ transaction (Atlas/replica set) |
-| `MONGODB_DATABASE=mas` | Lưu phiên, tin nhắn, tóm tắt và embedding |
-| `MONGODB_KNOWLEDGE_DATABASE=data` | Database giáo trình |
-| `MONGODB_KNOWLEDGE_COLLECTION=gtrinh` | Collection chứa các đoạn giáo trình |
-| `EMBEDDING_MODEL=BAAI/bge-m3` | Mô hình embedding |
-| `EMBEDDING_CACHE_DIR=.cache/models` | Cache mô hình trong dự án |
-| `SUMMARY_POLL_SECONDS=5` | Chu kỳ kiểm tra hàng đợi tóm tắt |
+Đặt file `.env` được cung cấp vào thư mục dự án và bảo đảm MongoDB có dữ liệu giáo trình. Các lệnh dưới đây là cách build và chạy image; không cần cài Python hay `uv` trên host.
+
+```bash
+docker build -t mas-agent:local .
+
+# Đánh chỉ mục trước khi thử câu hỏi lý thuyết hoặc bài tập.
+docker run --rm --env-file .env \
+  -e EMBEDDING_CACHE_DIR=/models \
+  -v mas-model-cache:/models \
+  mas-agent:local python -m scripts.index_knowledge
+
+# Chạy API ở chế độ nền.
+docker run -d --name mas-agent --restart unless-stopped \
+  -p 2003:2003 --env-file .env \
+  -e EMBEDDING_CACHE_DIR=/models \
+  -v mas-model-cache:/models \
+  mas-agent:local
+
+curl -f http://127.0.0.1:2003/health/
+docker logs --tail 100 mas-agent
+```
+
+Image không chứa `.env` hoặc cache BGE-M3. Volume `mas-model-cache` giữ model giữa các lần chạy; lần đánh chỉ mục đầu tiên sẽ tải model nếu volume còn trống. MongoDB phải là replica set hoặc Atlas để hỗ trợ transaction. Nếu proxy LLM chạy trên máy host, cấu hình `LLM_BASE_URL` bằng địa chỉ mà container truy cập được, không dùng `127.0.0.1` của host. Trên Docker Linux có thể thêm `--add-host=host.docker.internal:host-gateway` vào cả hai lệnh `docker run` và dùng `host.docker.internal` trong URL, miễn là proxy chấp nhận kết nối từ container.
+
+Để dừng và xóa container khi không dùng: `docker rm -f mas-agent`. Lệnh này giữ lại volume model và dữ liệu MongoDB. Chỉ xóa cache model nếu không cần nữa bằng `docker volume rm mas-model-cache` sau khi container đã dừng.
+
+## Giáo trình và chỉ mục
 
 `make index-knowledge` đọc các trường `chunk_id`, `source`, `heading_path`, `content` trong `data.gtrinh`. Lệnh tải BGE-M3 ở lần đầu, tạo vector dense 1024 chiều và lưu vào `mas.knowledge_embeddings`; giữ nguyên dữ liệu nguồn. Chạy lại sẽ bỏ qua các đoạn có cùng nội dung và mô hình. Với corpus nhỏ, truy xuất tính cosine trên các vector MongoDB, lấy tối đa 4 đoạn; không cần cấu hình Atlas Vector Search. Corpus lớn hơn cần chuyển bước tìm vector sang chỉ mục chuyên dụng.
 
@@ -62,6 +104,23 @@ curl -X POST http://127.0.0.1:2003/v1/chat \
   -d '{"content":"Vì sao cần kiểm tra trọng số không âm?","user_id":"<returned-user-id>","session_id":"<returned-session-id>"}'
 ```
 
+### Câu hỏi mẫu để thử
+
+Sau khi đánh chỉ mục giáo trình, có thể thay nội dung `content` trong lệnh `curl` ở trên bằng các câu sau. `route` là hướng xử lý dự kiến; hãy xem cả chất lượng `answer` và `sources`, không chỉ mã HTTP.
+
+| Câu hỏi | Route dự kiến | Điều cần kiểm tra |
+| --- | --- | --- |
+| “Đồ thị liên thông là gì? Đồ thị có hướng liên thông mạnh khác liên thông yếu thế nào?” | `knowledge` | Giải thích đủ hai khái niệm, đúng chiều điều kiện. |
+| “Điều kiện cần và đủ để đồ thị vô hướng có chu trình Euler là gì?” | `knowledge` | Nêu đúng điều kiện và nguồn giáo trình liên quan. |
+| “Vì sao Dijkstra cần trọng số cạnh không âm?” | `knowledge` | Giải thích lý do, không chỉ lặp lại điều kiện. |
+| “BFS và DFS khác nhau ở thứ tự duyệt và ứng dụng tìm đường đi như thế nào?” | `knowledge` | Phân biệt rõ cách duyệt và trường hợp sử dụng. |
+| “Cho các cạnh AB, AC, BC, CD; hãy tính bậc từng đỉnh và cho biết đồ thị có chu trình Euler không.” | `tutoring` | Gợi ý cách đếm bậc và kiểm tra điều kiện; không trả đáp án cuối. |
+| “Giải từng bước thuật toán Dijkstra trên đồ thị có cạnh AB=2, AC=5, BC=1 từ A đến C.” | `tutoring` | Gợi ý bước tiếp theo; không đưa kết quả hoặc lời giải đầy đủ. |
+
+Để kiểm tra bộ nhớ hội thoại, gửi câu hỏi “Nếu đồ thị có một đỉnh bậc lẻ thì điều kiện Euler vừa nói còn thỏa không?” bằng đúng `user_id` và `session_id` của câu hỏi Euler trước đó. Với câu hỏi bài tập, hãy kiểm tra rằng agent hướng dẫn người học tự làm thay vì tiết lộ kết quả.
+
+Bộ câu hỏi đầy đủ hơn nằm trong [GRAPH_THEORY_TEST_QUESTIONS.md](GRAPH_THEORY_TEST_QUESTIONS.md).
+
 ## Bộ nhớ
 
 Mỗi lượt thành công lưu nguyên tử hai tin (user, assistant) và số thứ tự trong MongoDB. Nếu hai request cùng sửa một phiên, request dùng ngữ cảnh cũ nhận HTTP 409 và cần gửi lại. Request lỗi không lưu một lượt dở dang.
@@ -82,9 +141,25 @@ Các endpoint đọc đều yêu cầu `user_id` và kiểm tra quan hệ với 
 
 `since`/`until` dùng ISO 8601 có múi giờ, ví dụ `2026-10-23T00:00:00Z`. Với tóm tắt, trả những khoảng thời gian giao với khoảng truy vấn. Lịch sử tin nhắn phân trang tăng dần theo `after_sequence`; tóm tắt lấy các bản mới nhất trong khoảng rồi trả theo thứ tự cũ đến mới.
 
-`user_id` hiện là khóa phân vùng dữ liệu, chưa phải xác thực danh tính. Dự án vẫn cần cơ chế xác thực thật trước khi mở API công khai.
+## API agent cũ
 
-API cũ `/v1/agent/sessions` dùng `problem`/`context` vẫn được giữ để tương thích; dùng `/v1/chat` cho luồng gia sư và bộ nhớ mới.
+API `/v1/agent/sessions` dùng `problem`/`context` vẫn được giữ cho client hiện có:
+
+| Endpoint | Chức năng |
+| --- | --- |
+| `POST /v1/agent/sessions` | Tạo phiên từ `problem` và `context` tùy chọn; trả trạng thái `waiting_for_user` hoặc `completed` |
+| `GET /v1/agent/sessions/{session_id}` | Đọc phiên hiện tại |
+| `POST /v1/agent/sessions/{session_id}/replies` | Gửi `{"answer":"..."}` khi phiên đang chờ người dùng |
+
+Phiên được lưu trong collection `agent_sessions` của `MONGODB_DATABASE` và đọc được sau khi server khởi động lại. Request trả lời dùng `revision` để chặn ghi đè khi hai request cùng sửa một phiên; nếu nhận HTTP 409, client cần đọc lại phiên trước khi gửi tiếp. Luồng này cần MongoDB và LLM được cấu hình. Dùng `/v1/chat` cho trợ giảng, truy xuất giáo trình và bộ nhớ hội thoại.
+
+## Lưu ý khi triển khai
+
+- `user_id` hiện là khóa phân vùng dữ liệu, chưa phải xác thực danh tính. Cần bổ sung xác thực và phân quyền trước khi công khai API.
+- `GET /health/` chỉ xác nhận tiến trình HTTP đang chạy, không kiểm tra proxy LLM, MongoDB hoặc chỉ mục giáo trình.
+- HTTP 409 nghĩa là phiên đã đổi trong lúc xử lý; client nên tải lại trạng thái rồi gửi lại. HTTP 503 thường báo phụ thuộc chưa sẵn sàng hoặc thiếu chỉ mục. HTTP 502 báo agent/LLM không tạo được câu trả lời hợp lệ.
+- Các request hỏi bài và lý thuyết sẽ cần BGE-M3 cùng chỉ mục của đúng `EMBEDDING_MODEL`. Thay model thì chạy lại `make index-knowledge`.
+- Truy xuất hiện đọc các vector của corpus nhỏ từ MongoDB để tính cosine trong tiến trình API. Với corpus lớn, cần chuyển sang hệ thống tìm vector chuyên dụng để tránh tăng độ trễ và bộ nhớ.
 
 ## Cấu trúc
 
@@ -94,19 +169,25 @@ API cũ `/v1/agent/sessions` dùng `problem`/`context` vẫn được giữ đ�
 | `app/core/models/chat.py` | Schema đầu vào, định tuyến, tin nhắn và tóm tắt |
 | `app/core/use_cases/chat_system.py` | Điều phối các agent và worker tóm tắt |
 | `app/infra/db/chat_store.py` | MongoDB, transaction, phân vùng theo phiên và lease |
+| `app/infra/db/agent_sessions.py` | Phiên của API agent cũ trong MongoDB, kiểm soát ghi đè bằng revision |
 | `app/services/llm_service.py` | Adapter LLM và kiểm tra JSON response |
 | `app/services/embedding_service.py` | Embedding BGE-M3 chạy ngoài event loop |
 | `app/services/vector_store.py` | Index và truy xuất giáo trình bằng cosine |
 | `scripts/index_knowledge.py` | Index tăng dần, chạy lại được |
+| `Dockerfile`, `.dockerignore` | Đóng gói API và loại credentials/cache khỏi build context |
 
 ## Kiểm thử
 
 ```bash
+# Unit/integration nội bộ: không cần dịch vụ ngoài.
 make test
 make lint
 make type
-# Opt-in: MongoDB thật từ .env, LLM giả; tạo và xóa database test riêng.
-MAS_LIVE_MONGO=1 uv run --extra dev pytest tests/integration/test_chat_mongo.py
+
+# Integration: MongoDB thật, LLM giả; tạo và xóa database test riêng.
+MAS_LIVE_MONGO=1 uv run --extra dev pytest tests/integration/test_chat_mongo.py tests/integration/test_agent_mongo.py
 ```
 
-Bộ test mặc định không gọi LLM hay MongoDB thật. Test MongoDB opt-in kiểm tra lưu nguyên tử, giới hạn 10 tin, tóm tắt, lọc thời gian và phân vùng phiên/người dùng.
+`make test` dùng các bản giả để kiểm tra logic nhanh và ổn định. Bộ integration opt-in kết nối MongoDB thật để kiểm tra lưu nguyên tử, giới hạn 10 tin, tóm tắt, lọc thời gian, phân vùng phiên/người dùng, lưu phiên agent qua hai instance và từ chối ghi đè phiên cũ; LLM của bộ này là bản giả để kết quả xác định được. Test dùng database riêng và tự xóa sau khi chạy.
+
+Để kiểm tra **cả LLM lẫn MongoDB thật**, chạy API với file cấu hình được cung cấp, đánh chỉ mục giáo trình, rồi gửi các câu hỏi ở mục [Câu hỏi mẫu để thử](#câu-hỏi-mẫu-để-thử). Kiểm tra mã HTTP, `route`, `answer` và `sources`; riêng câu hỏi lý thuyết nên có nguồn. Đây là bước thử trực tiếp với các dịch vụ ngoài, tách khỏi bộ test tự động ở trên.

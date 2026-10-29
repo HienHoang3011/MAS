@@ -1,17 +1,14 @@
 """HTTP interface for the conversational agent system."""
 
-from functools import lru_cache
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from pymongo.errors import PyMongoError
 
-from app.config.config import get_settings
 from app.core.models.agent import AgentSession
 from app.core.use_cases.agent_system import AgentSystem, InvalidSessionStateError
-from app.infra.clients.context_search import ContextSearchTool
-from app.infra.db.agent_sessions import InMemorySessionStore, SessionNotFoundError
-from app.services.llm_service import build_llm
+from app.infra.db.agent_sessions import AgentSessionConflictError, SessionNotFoundError
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -25,27 +22,11 @@ class ReplyRequest(BaseModel):
     answer: str = Field(min_length=1, max_length=6000)
 
 
-@lru_cache(maxsize=1)
-def _build_agent_system() -> AgentSystem:
-    settings = get_settings()
-    try:
-        llm = build_llm(settings)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
-    return AgentSystem(
-        llm=llm,
-        store=InMemorySessionStore(),
-        tools=[ContextSearchTool()],
-        max_clarifications=settings.agent_max_clarifications,
-        max_executions=settings.agent_max_executions,
-    )
-
-
-async def get_agent_system() -> AgentSystem:
-    return _build_agent_system()
+async def get_agent_system(request: Request) -> AgentSystem:
+    system: AgentSystem | None = getattr(request.app.state, "agent_system", None)
+    if system is None:
+        raise HTTPException(status_code=503, detail="Agent requires MongoDB and LLM configuration")
+    return system
 
 
 AgentSystemDependency = Annotated[AgentSystem, Depends(get_agent_system)]
@@ -55,6 +36,8 @@ AgentSystemDependency = Annotated[AgentSystem, Depends(get_agent_system)]
 async def start_session(request: StartRequest, system: AgentSystemDependency) -> AgentSession:
     try:
         return await system.start(request.problem, request.context)
+    except PyMongoError as exc:
+        raise HTTPException(status_code=503, detail="MongoDB operation failed") from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Agent processing failed") from exc
 
@@ -62,9 +45,11 @@ async def start_session(request: StartRequest, system: AgentSystemDependency) ->
 @router.get("/sessions/{session_id}", response_model=AgentSession)
 async def get_session(session_id: str, system: AgentSystemDependency) -> AgentSession:
     try:
-        return system.get(session_id)
+        return await system.get(session_id)
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
+    except PyMongoError as exc:
+        raise HTTPException(status_code=503, detail="MongoDB operation failed") from exc
 
 
 @router.post("/sessions/{session_id}/replies", response_model=AgentSession)
@@ -77,5 +62,9 @@ async def reply(
         raise HTTPException(status_code=404, detail="Session not found") from exc
     except InvalidSessionStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AgentSessionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PyMongoError as exc:
+        raise HTTPException(status_code=503, detail="MongoDB operation failed") from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Agent processing failed") from exc
