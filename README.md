@@ -62,16 +62,26 @@ docker run --rm --env-file .env \
 
 # Chạy API ở chế độ nền.
 docker run -d --name mas-agent --restart unless-stopped \
-  -p 2003:2003 --env-file .env \
+  -p 127.0.0.1:2003:2003 --env-file .env \
   -e EMBEDDING_CACHE_DIR=/models \
   -v mas-model-cache:/models \
   mas-agent:local
 
 curl -f http://127.0.0.1:2003/health/
+curl -f -sS -X POST http://127.0.0.1:2003/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"Xin chào!"}'
+curl -f -sS -X POST http://127.0.0.1:2003/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"Vì sao Dijkstra cần trọng số cạnh không âm?"}'
 docker logs --tail 100 mas-agent
 ```
 
-Image không chứa `.env` hoặc cache BGE-M3. Volume `mas-model-cache` giữ model giữa các lần chạy; lần đánh chỉ mục đầu tiên sẽ tải model nếu volume còn trống. MongoDB phải là replica set hoặc Atlas để hỗ trợ transaction. Nếu proxy LLM chạy trên máy host, cấu hình `LLM_BASE_URL` bằng địa chỉ mà container truy cập được, không dùng `127.0.0.1` của host. Trên Docker Linux có thể thêm `--add-host=host.docker.internal:host-gateway` vào cả hai lệnh `docker run` và dùng `host.docker.internal` trong URL, miễn là proxy chấp nhận kết nối từ container.
+Image không chứa `.env` hoặc cache BGE-M3. Volume `mas-model-cache` giữ model giữa các lần chạy. Nếu dữ liệu đã được đánh chỉ mục từ trước, lệnh index có thể bỏ qua toàn bộ đoạn và model sẽ chỉ tải khi có câu hỏi lý thuyết/bài tập đầu tiên. Máy chạy container cần đủ vài GB dung lượng và truy cập được kho model trong lần tải đầu. MongoDB phải là replica set hoặc Atlas để hỗ trợ transaction; nếu dùng Atlas, cho phép IP của máy triển khai trong danh sách truy cập. Proxy LLM và MongoDB cũng phải truy cập được từ máy chạy container.
+
+Hai lệnh `curl` kiểm tra lần lượt chat và truy xuất giáo trình. Với câu Dijkstra, xem response có `route=knowledge` và `sources` không rỗng; `GET /health/` riêng lẻ chưa kiểm tra được các phụ thuộc này.
+
+Lệnh trên chỉ mở API ở `127.0.0.1` của máy chạy Docker. Để cho client từ xa truy cập, đặt một reverse proxy có xác thực phía trước rồi cấu hình cổng phù hợp; API hiện chưa tự xác thực người dùng. Nếu proxy LLM chạy trên máy host, cấu hình `LLM_BASE_URL` bằng địa chỉ mà container truy cập được, không dùng `127.0.0.1` của host. Trên Docker Linux có thể thêm `--add-host=host.docker.internal:host-gateway` vào cả hai lệnh `docker run` và dùng `host.docker.internal` trong URL, miễn là proxy chấp nhận kết nối từ container.
 
 Để dừng và xóa container khi không dùng: `docker rm -f mas-agent`. Lệnh này giữ lại volume model và dữ liệu MongoDB. Chỉ xóa cache model nếu không cần nữa bằng `docker volume rm mas-model-cache` sau khi container đã dừng.
 
