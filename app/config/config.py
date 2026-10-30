@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     # App
     env: str = Field(default="dev")
     log_level: str = Field(default="INFO")
+    # Prefix khi chạy sau reverse proxy có strip path (vd /mas) — để /docs trỏ đúng openapi.json.
+    root_path: str = ""
+    # Danh sách origin được gọi API từ trình duyệt, phân cách bởi dấu phẩy. Trống = tắt CORS.
+    cors_allowed_origins: str = ""
 
     # LLM / Embeddings
     llm_provider: Literal["openai", "gemini", "proxy"] = "openai"
