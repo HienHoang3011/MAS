@@ -17,7 +17,7 @@ flowchart TD
     C -->|Câu đơn giản, auto| I[Trả lời ngay trong một lần gọi LLM]
     I --> G
     C -->|Trò chuyện cần xử lý đầy đủ| E[Tạo bản nháp]
-    C -->|Hỏi bài hoặc lý thuyết cần nguồn| D[BGE-M3 truy xuất giáo trình trong MongoDB]
+    C -->|Cần suy luận sâu hoặc kiểm chứng nguồn| D[BGE-M3 truy xuất giáo trình trong MongoDB]
     D --> E
     E --> F[Agent kiểm tra nội dung và giới hạn hướng dẫn]
     F -->|Chưa đạt, còn lượt thử| E
@@ -26,6 +26,8 @@ flowchart TD
 ```
 
 Phần kiểm tra đánh giá độ đầy đủ, tính đúng của câu trả lời lý thuyết, căn cứ từ nguồn và việc giữ đúng vai trò gia sư. Bản nháp không đạt được sửa tối đa một lần; nếu vẫn không đạt, API trả HTTP 502 và không lưu lượt chat đó. Đây là đánh giá bằng LLM, không phải bảo đảm toán học về tính đúng đắn.
+
+Các tiêu chí được kiểm tra cùng trong một lượt gọi LLM cho mỗi bản nháp. Kết quả kiểm tra gom ID các đoạn đúng thành một danh sách và chỉ mô tả các đoạn sai, tránh lặp lại nội dung câu trả lời. Ứng dụng vẫn kiểm tra mỗi đoạn được đánh giá đúng một lần và các trích dẫn dùng ID hợp lệ. Khi bản nháp đầu tiên đạt, luồng đầy đủ dùng 3 lượt gọi: định tuyến, tạo câu trả lời và kiểm tra tổng hợp. Nhánh `auto` trả lời câu đơn giản vẫn chỉ dùng 1 lượt gọi. Nếu phải sửa bản nháp, luồng đầy đủ dùng thêm 2 lượt gọi.
 
 API `/v1/agent/sessions` là luồng agent cũ dùng `problem` và `context`. Client đã dùng API này có thể tiếp tục: phiên được lưu trong MongoDB và đọc được sau khi khởi động lại. Luồng `/v1/chat` là luồng chính cho trợ giảng, truy xuất giáo trình và bộ nhớ hội thoại.
 
@@ -75,7 +77,7 @@ curl -f -sS -X POST http://127.0.0.1:2003/v1/chat \
   -d '{"content":"Xin chào!"}'
 curl -f -sS -X POST http://127.0.0.1:2003/v1/chat \
   -H 'Content-Type: application/json' \
-  -d '{"content":"Vì sao Dijkstra cần trọng số cạnh không âm?"}'
+  -d '{"content":"Vì sao Dijkstra cần trọng số cạnh không âm?","mode":"standard"}'
 docker logs --tail 100 mas-agent
 ```
 
@@ -90,6 +92,8 @@ Lệnh trên chỉ mở API ở `127.0.0.1` của máy chạy Docker. Để cho 
 ## Giáo trình và chỉ mục
 
 `make index-knowledge` đọc các trường `chunk_id`, `source`, `heading_path`, `content` trong `data.gtrinh`. Lệnh tải BGE-M3 ở lần đầu, tạo vector dense 1024 chiều và lưu vào `mas.knowledge_embeddings`; giữ nguyên dữ liệu nguồn. Chạy lại sẽ bỏ qua các đoạn có cùng nội dung và mô hình. Với corpus nhỏ, truy xuất tính cosine trên các vector MongoDB, lấy tối đa 4 đoạn; không cần cấu hình Atlas Vector Search. Corpus lớn hơn cần chuyển bước tìm vector sang chỉ mục chuyên dụng.
+
+API cache chỉ mục và ma trận vector đã chuẩn hóa trong RAM tối đa 5 phút, tránh đọc lại toàn bộ vector từ MongoDB ở mỗi request. Sau khi đánh chỉ mục lại, dữ liệu mới được nạp ở lượt truy xuất đầu tiên khi cache hết hạn; khởi động lại API nếu cần cập nhật ngay.
 
 ## Chat API
 
@@ -106,7 +110,7 @@ Input gồm `content`, `user_id` tùy chọn và `session_id` tùy chọn:
 - Có cả hai ID: tiếp tục đúng phiên; trả 404 nếu phiên không thuộc người dùng.
 - Muốn mở phiên mới cho người dùng đã có: `POST /v1/chat/sessions` với `{"user_id":"student-01"}`.
 
-Mặc định `mode=auto`: agent nhận diện câu hỏi trong một lần gọi LLM. Với hội thoại thông thường hoặc định nghĩa đơn giản không cần giáo trình, agent trả lời ngay theo nhánh nhanh. Bài tập, chứng minh, câu hỏi nhiều ý hoặc câu cần căn cứ giáo trình đi qua luồng đầy đủ. Client không cần gửi `mode` để sử dụng cách này.
+Mặc định `mode=auto`: agent ưu tiên nhánh nhanh cho hội thoại, câu lý thuyết thông thường, giải thích thuật toán ngắn và bài tập đơn giản. Ví dụ, “Vì sao Dijkstra cần trọng số không âm?” được trả lời trực tiếp; với bài tập đơn giản, agent chỉ gợi ý phương pháp và bước tiếp theo. Chỉ yêu cầu cần suy luận nhiều bước, chứng minh dài, thuật toán phức tạp, nhiều ràng buộc phụ thuộc nhau hoặc cần kiểm chứng giáo trình mới đi qua luồng đầy đủ. Client không cần gửi `mode` để hệ thống tự chọn. Việc nhận diện do LLM thực hiện, vì vậy có thể phân loại sai.
 
 Có thể ghi đè bằng `mode=standard` để luôn truy xuất/kiểm tra, hoặc `mode=fast` để luôn gọi LLM trực tiếp một lần:
 

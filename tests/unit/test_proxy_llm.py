@@ -6,10 +6,23 @@ import json
 import httpx
 import pytest
 from openai import AsyncOpenAI
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.core.models.chat import MemorySummary
 from app.services import llm_service
+
+
+def test_compact_schema_preserves_fields_named_like_schema_metadata() -> None:
+    class Metadata(BaseModel):
+        title: str
+        default: int = 1
+
+    schema = json.loads(llm_service._proxy_schema(Metadata))
+    assert "title" not in schema
+    assert set(schema["properties"]) == {"title", "default"}
+    assert schema["properties"]["title"] == {"type": "string"}
+    assert schema["properties"]["default"] == {"type": "integer"}
+    assert schema["required"] == ["title"]
 
 
 @pytest.mark.parametrize(

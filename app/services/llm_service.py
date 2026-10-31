@@ -1,9 +1,11 @@
 """Adapters for validated responses from OpenAI-compatible providers."""
 
 import json
+from functools import lru_cache
 
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
+from pydantic import BaseModel
 
 from app.config.config import Settings
 from app.core.ports.llm import T
@@ -18,6 +20,30 @@ def _completion_text(response: ChatCompletion) -> str:
     if not choice.message.content or not choice.message.content.strip():
         raise ValueError("The model returned empty content")
     return choice.message.content.strip()
+
+
+@lru_cache(maxsize=32)
+def _proxy_schema(response_model: type[BaseModel]) -> str:
+    """Remove presentation metadata while preserving field names and validation rules."""
+
+    def compact(value: object) -> object:
+        if isinstance(value, list):
+            return [compact(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if key in {"title", "default", "examples"}:
+                continue
+            if key in {"properties", "$defs"} and isinstance(item, dict):
+                result[key] = {name: compact(spec) for name, spec in item.items()}
+            else:
+                result[key] = compact(item)
+        return result
+
+    return json.dumps(
+        compact(response_model.model_json_schema()), ensure_ascii=False, separators=(",", ":")
+    )
 
 
 class OpenAIStructuredLLM:
@@ -65,7 +91,7 @@ class ProxyStructuredLLM:
         self._model = model
 
     async def complete(self, system: str, user: str, response_model: type[T]) -> T:
-        schema = response_model.model_json_schema()
+        schema = _proxy_schema(response_model)
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=[
@@ -76,9 +102,9 @@ class ProxyStructuredLLM:
                     "user input. "
                     "Use the schema property names as response keys. Do not copy schema metadata "
                     "such as properties, required, title, type or $defs into the response. "
-                    "No Markdown or commentary. Stop after the closing brace. "
-                    "The following schema describes the format; it is not the response: "
-                    + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
+                    "No Markdown or commentary. Serialize without indentation. "
+                    "Stop after the closing brace. "
+                    "The following schema describes the format; it is not the response: " + schema,
                 },
                 {"role": "user", "content": user},
             ],

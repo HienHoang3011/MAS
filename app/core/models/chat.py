@@ -38,7 +38,7 @@ class RoutingDecision(BaseModel):
     route: Literal[ChatRoute.CONVERSATION, ChatRoute.TUTORING, ChatRoute.KNOWLEDGE]
     use_fast: bool = False
     fast_answer: str | None = Field(default=None, max_length=3000)
-    retrieval_query: str = Field(default="", max_length=2000)
+    retrieval_query: str | None = Field(default=None, max_length=2000)
     requirements: list[Annotated[str, Field(min_length=1, max_length=1000)]] = Field(
         default_factory=list, max_length=8
     )
@@ -134,8 +134,14 @@ class ReplyReview(ReplyCoverage):
     facts: list[FactReview] = Field(min_length=1, max_length=128)
 
 
+class FactIssue(BaseModel):
+    block_id: int = Field(ge=0)
+    issue: str = Field(min_length=1, max_length=500)
+
+
 class SourceCitation(BaseModel):
-    answer_block_ids: list[int] = Field(min_length=1, max_length=128)
+    # Invalid/empty evidence is reported by review_issues so the draft can be rewritten.
+    answer_block_ids: list[int] = Field(max_length=128)
     source_index: int = Field(ge=0)
     source_block_ids: list[int] = Field(max_length=128)
 
@@ -145,6 +151,17 @@ class GuidanceReview(BaseModel):
     grounded: bool
     pedagogically_safe: bool
     feedback: str | None = Field(default=None, max_length=3000)
+
+
+class KnowledgeReview(ReplyCoverage, GuidanceReview):
+    """One audit of coverage, factual accuracy, sources and tutoring boundaries."""
+
+    correct_block_ids: list[int] = Field(max_length=128)
+    incorrect_blocks: list[FactIssue] = Field(max_length=128)
+
+
+class TutoringReview(ReplyCoverage, GuidanceReview):
+    """One audit of useful guidance, sources and tutoring boundaries."""
 
 
 class ChatResponse(BaseModel):

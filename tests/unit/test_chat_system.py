@@ -14,15 +14,18 @@ from app.core.models.chat import (
     ChatRequest,
     ChatRoute,
     ChatSession,
+    FactIssue,
     FactReview,
     GuidanceReview,
     KnowledgePassage,
+    KnowledgeReview,
     MemorySummary,
     ReplyCoverage,
     ReplyReview,
     RequirementCoverage,
     RoutingDecision,
     SourceCitation,
+    TutoringReview,
 )
 from app.core.ports.llm import T
 from app.core.use_cases.chat_system import ChatSystem, GuidancePolicyError, text_blocks
@@ -89,6 +92,26 @@ def approved_reply_review(answer: str) -> ReplyReview:
     )
 
 
+def approved_knowledge_review(
+    answer: str, passage: KnowledgePassage | None = None
+) -> KnowledgeReview:
+    return KnowledgeReview(
+        checks=approved_reply_review(answer).checks,
+        correct_block_ids=list(range(len(text_blocks(answer)))),
+        incorrect_blocks=[],
+        **approved_review(answer, passage).model_dump(),
+    )
+
+
+def approved_tutoring_review(
+    answer: str, passage: KnowledgePassage | None = None
+) -> TutoringReview:
+    return TutoringReview(
+        checks=approved_reply_review(answer).checks,
+        **approved_review(answer, passage).model_dump(),
+    )
+
+
 def dependencies() -> tuple[Mock, Mock]:
     store = Mock(spec=MongoChatStore)
     store.resolve_session = AsyncMock(return_value=ChatSession(user_id="student"))
@@ -128,6 +151,7 @@ def test_fast_chat_calls_only_generation_and_saves_the_turn() -> None:
     assert response.sources == []
     assert response.answer == "Hãy bắt đầu bằng cách xác định các đỉnh kề của A."
     assert len(llm.inputs) == 1
+    assert isinstance(llm.inputs[0], dict)
     assert llm.inputs[0]["content"] == "Hướng dẫn mình làm BFS"
     retriever.search.assert_not_called()
     store.commit_turn.assert_awaited_once_with(
@@ -137,27 +161,44 @@ def test_fast_chat_calls_only_generation_and_saves_the_turn() -> None:
     )
 
 
-def test_auto_chat_answers_simple_question_in_one_llm_call() -> None:
+@pytest.mark.parametrize(
+    ("content", "route", "answer"),
+    [
+        ("Xin chào", "conversation", "Chào bạn!"),
+        (
+            "Vì sao Dijkstra cần trọng số không âm?",
+            "knowledge",
+            "Cạnh âm có thể làm giảm khoảng cách của một đỉnh đã chốt.",
+        ),
+        ("Tính bậc đỉnh A từ các cạnh AB, AC", "tutoring", "Hãy đếm các cạnh kề đỉnh A nhé?"),
+    ],
+)
+def test_auto_chat_answers_simple_question_in_one_llm_call(
+    content: str, route: str, answer: str
+) -> None:
     store, retriever = dependencies()
     llm = ScriptedLLM(
         [
-            RoutingDecision(
-                route=ChatRoute.CONVERSATION,
-                requirements=[],
-                use_fast=True,
-                fast_answer="Chào bạn!",
+            RoutingDecision.model_validate(
+                {
+                    "route": route,
+                    "requirements": [],
+                    "retrieval_query": None,
+                    "use_fast": True,
+                    "fast_answer": answer,
+                }
             )
         ]
     )
-    response = asyncio.run(ChatSystem(llm, store, retriever).chat(ChatRequest(content="Xin chào")))
+    response = asyncio.run(ChatSystem(llm, store, retriever).chat(ChatRequest(content=content)))
     assert response.route == ChatRoute.DIRECT
-    assert response.answer == "Chào bạn!"
+    assert response.answer == answer
     assert len(llm.inputs) == 1
     retriever.search.assert_not_called()
     store.commit_turn.assert_awaited_once()
 
 
-def test_auto_chat_keeps_exercise_in_reviewed_flow() -> None:
+def test_auto_chat_keeps_complex_exercise_in_reviewed_flow() -> None:
     store, retriever = dependencies()
     answer = "Hãy bắt đầu bằng cách đếm bậc từng đỉnh."
     llm = ScriptedLLM(
@@ -165,26 +206,63 @@ def test_auto_chat_keeps_exercise_in_reviewed_flow() -> None:
             RoutingDecision(
                 route=ChatRoute.TUTORING,
                 requirements=["Give a hint"],
-                use_fast=True,
+                use_fast=False,
                 fast_answer="Đáp án cuối.",
             ),
             answer,
-            approved_reply_review(answer),
-            approved_review(answer),
+            approved_tutoring_review(answer),
         ]
     )
     response = asyncio.run(
-        ChatSystem(llm, store, retriever).chat(ChatRequest(content="Giải bài đồ thị này"))
+        ChatSystem(llm, store, retriever).chat(
+            ChatRequest(content="Hướng dẫn chứng minh thuật toán này với nhiều ràng buộc")
+        )
     )
     assert response.route == ChatRoute.TUTORING
     assert response.answer == answer
-    assert len(llm.inputs) == 4
+    assert len(llm.inputs) == 3
     retriever.search.assert_awaited_once()
 
 
 def test_router_cannot_select_direct_mode() -> None:
     with pytest.raises(ValidationError):
-        RoutingDecision(route=ChatRoute.DIRECT, requirements=["Respond"])
+        RoutingDecision.model_validate({"route": "direct", "requirements": ["Respond"]})
+
+
+def test_knowledge_uses_one_combined_review_and_keeps_sources() -> None:
+    store, retriever = dependencies()
+    passage = KnowledgePassage(
+        id="tree",
+        source="Textbook",
+        content="Cây là đồ thị liên thông không có chu trình.",
+        score=0.9,
+    )
+    retriever.search.return_value = [passage]
+    llm = ScriptedLLM(
+        [
+            RoutingDecision(
+                route=ChatRoute.KNOWLEDGE,
+                requirements=["Define a tree"],
+                use_fast=True,
+                fast_answer="Ignored because the client selected standard.",
+            ),
+            passage.content,
+            approved_knowledge_review(passage.content, passage),
+        ]
+    )
+    response = asyncio.run(
+        ChatSystem(llm, store, retriever).chat(ChatRequest(content="Cây là gì?", mode="standard"))
+    )
+    assert len(llm.inputs) == 3
+    assert not llm.responses
+    assert response.route == ChatRoute.KNOWLEDGE
+    assert response.sources[0].id == passage.id
+    review_input = llm.inputs[-1]
+    assert isinstance(review_input, dict)
+    assert review_input["retrieved_passages"] == [
+        {"source_index": 0, "source": passage.source, "blocks": {"0": passage.content}}
+    ]
+    store.commit_turn.assert_awaited_once()
 
 
 def test_tutoring_rewrites_a_leaked_answer_before_saving() -> None:
@@ -202,16 +280,14 @@ def test_tutoring_rewrites_a_leaked_answer_before_saving() -> None:
                 requirements=["Explain the method without giving the edge count"],
             ),
             "Có 3 cạnh.",
-            approved_reply_review("Có 3 cạnh."),
-            approved_review("Có 3 cạnh.").model_copy(
+            approved_tutoring_review("Có 3 cạnh.").model_copy(
                 update={
                     "pedagogically_safe": False,
                     "feedback": "Do not give the final edge count.",
                 }
             ),
             "Hãy cộng các bậc rồi áp dụng định lý bắt tay.",
-            approved_reply_review("Hãy cộng các bậc rồi áp dụng định lý bắt tay."),
-            approved_review(
+            approved_tutoring_review(
                 "Hãy cộng các bậc rồi áp dụng định lý bắt tay.",
                 retriever.search.return_value[0],
             ),
@@ -230,7 +306,7 @@ def test_tutoring_rewrites_a_leaked_answer_before_saving() -> None:
         "Tính số cạnh khi các bậc là 2, 2, 2",
         response.answer,
     )
-    assert "Do not give the final edge count." in json.dumps(llm.inputs[4])
+    assert "Do not give the final edge count." in json.dumps(llm.inputs[3])
 
 
 def test_rejected_replies_are_not_persisted() -> None:
@@ -239,13 +315,11 @@ def test_rejected_replies_are_not_persisted() -> None:
         [
             RoutingDecision(route=ChatRoute.TUTORING, requirements=["Give a next-step hint"]),
             "Đáp án cuối.",
-            approved_reply_review("Đáp án cuối."),
-            approved_review("Đáp án cuối.").model_copy(
+            approved_tutoring_review("Đáp án cuối.").model_copy(
                 update={"pedagogically_safe": False, "feedback": "Leaks answer"}
             ),
             "Đáp án cuối.",
-            approved_reply_review("Đáp án cuối."),
-            approved_review("Đáp án cuối.").model_copy(
+            approved_tutoring_review("Đáp án cuối.").model_copy(
                 update={"pedagogically_safe": False, "feedback": "Still leaks"}
             ),
         ]
@@ -308,7 +382,8 @@ def test_invalid_chat_identity_or_content_is_rejected(payload: dict[str, str]) -
         ChatRequest.model_validate(payload)
 
 
-def test_nonexistent_evidence_cannot_approve_an_introduction() -> None:
+@pytest.mark.parametrize("answer_block_ids", [[], [99]])
+def test_invalid_citation_cannot_approve_an_introduction(answer_block_ids: list[int]) -> None:
     store, retriever = dependencies()
     passage = KnowledgePassage(
         id="tree",
@@ -323,26 +398,24 @@ def test_nonexistent_evidence_cannot_approve_an_introduction() -> None:
         [
             RoutingDecision(route=ChatRoute.KNOWLEDGE, requirements=["Define a tree"]),
             introduction,
-            approved_reply_review(introduction),
-            approved_review(definition, passage).model_copy(
+            approved_knowledge_review(introduction, passage).model_copy(
                 update={
                     "citations": [
                         approved_review(definition, passage)
                         .citations[0]
-                        .model_copy(update={"answer_block_ids": [99]})
+                        .model_copy(update={"answer_block_ids": answer_block_ids})
                     ]
                 }
             ),
             definition,
-            approved_reply_review(definition),
-            approved_review(definition, passage),
+            approved_knowledge_review(definition, passage),
         ]
     )
     response = asyncio.run(
         ChatSystem(llm, store, retriever).chat(ChatRequest(content="Cây là gì?"))
     )
     assert response.answer == definition
-    rewrite = llm.inputs[4]
+    rewrite = llm.inputs[3]
     assert isinstance(rewrite, dict)
     assert rewrite["previous_draft"] == introduction
     assert rewrite["review_feedback"]
@@ -386,31 +459,17 @@ def test_unverifiable_reviews_exhaust_attempts_without_saving() -> None:
         [
             RoutingDecision(route=ChatRoute.KNOWLEDGE, requirements=["Explain the concept"]),
             "I will greet you.",
-            approved_reply_review("Hello!").model_copy(
+            approved_knowledge_review("Hello!").model_copy(
                 update={
-                    "facts": [
-                        FactReview(
-                            block_id=0,
-                            claim="Candidate statement.",
-                            assessment="The stated rule contradicts this claim.",
-                            correct=False,
-                            issue="Invalid statement.",
-                        )
-                    ]
+                    "correct_block_ids": [],
+                    "incorrect_blocks": [FactIssue(block_id=0, issue="Invalid statement.")],
                 }
             ),
             "I will respond now.",
-            approved_reply_review("Hello!").model_copy(
+            approved_knowledge_review("Hello!").model_copy(
                 update={
-                    "facts": [
-                        FactReview(
-                            block_id=0,
-                            claim="Candidate statement.",
-                            assessment="The stated rule contradicts this claim.",
-                            correct=False,
-                            issue="Invalid statement.",
-                        )
-                    ]
+                    "correct_block_ids": [],
+                    "incorrect_blocks": [FactIssue(block_id=0, issue="Invalid statement.")],
                 }
             ),
         ]
@@ -420,7 +479,7 @@ def test_unverifiable_reviews_exhaust_attempts_without_saving() -> None:
     store.commit_turn.assert_not_called()
 
 
-def test_incomplete_reply_is_rewritten_before_reading_sources() -> None:
+def test_combined_review_rejects_missing_content_even_with_complete_sources() -> None:
     store, retriever = dependencies()
     passage = KnowledgePassage(
         id="tree",
@@ -433,29 +492,21 @@ def test_incomplete_reply_is_rewritten_before_reading_sources() -> None:
         [
             RoutingDecision(route=ChatRoute.KNOWLEDGE, requirements=["Define a tree"]),
             "Sau đây là định nghĩa cây.",
-            ReplyReview(
-                checks=[
-                    RequirementCoverage(
-                        requirement_index=0,
-                        satisfied=False,
-                        answer_block_ids=[],
-                        issue="The definition is missing.",
-                    )
-                ],
-                facts=[
-                    FactReview(
-                        block_id=0,
-                        claim="Introductory statement.",
-                        assessment="No factual error.",
-                        correct=True,
-                        issue=None,
-                    )
-                ],
-                feedback="Provide the definition, not a promise.",
+            approved_knowledge_review("Sau đây là định nghĩa cây.", passage).model_copy(
+                update={
+                    "checks": [
+                        RequirementCoverage(
+                            requirement_index=0,
+                            satisfied=False,
+                            answer_block_ids=[],
+                            issue="The definition is missing.",
+                        )
+                    ],
+                    "feedback": "Provide the definition, not a promise.",
+                },
             ),
             passage.content,
-            approved_reply_review(passage.content),
-            approved_review(passage.content, passage),
+            approved_knowledge_review(passage.content, passage),
         ]
     )
     response = asyncio.run(
@@ -463,35 +514,32 @@ def test_incomplete_reply_is_rewritten_before_reading_sources() -> None:
     )
     assert response.answer == passage.content
     assert isinstance(llm.inputs[2], dict)
-    assert "retrieved_passages" not in llm.inputs[2]
-    assert "retrieved_passages" in llm.inputs[-1]
+    assert llm.inputs[2]["candidate_blocks"] == [
+        {"block_id": 0, "text": "Sau đây là định nghĩa cây."}
+    ]
+    assert llm.inputs[2]["retrieved_passages"]
+    assert len(llm.inputs) == 5
     store.commit_turn.assert_awaited_once()
 
 
-def test_inaccurate_reply_is_rewritten_before_source_review() -> None:
+def test_combined_review_rewrites_an_inaccurate_reply() -> None:
     store, retriever = dependencies()
     corrected = "Cạnh âm có thể làm đường đi ngắn hơn."
     llm = ScriptedLLM(
         [
             RoutingDecision(route=ChatRoute.KNOWLEDGE, requirements=["Explain negative edges"]),
             "Cạnh âm làm đường đi dài hơn.",
-            approved_reply_review("Cạnh âm làm đường đi dài hơn.").model_copy(
+            approved_knowledge_review("Cạnh âm làm đường đi dài hơn.").model_copy(
                 update={
-                    "facts": [
-                        FactReview(
-                            block_id=0,
-                            claim="Negative weights increase distance.",
-                            assessment="Negative weights decrease distance.",
-                            correct=False,
-                            issue="Negative weights reduce distance.",
-                        )
+                    "correct_block_ids": [],
+                    "incorrect_blocks": [
+                        FactIssue(block_id=0, issue="Negative weights reduce distance.")
                     ],
                     "feedback": "Negative weights reduce distance.",
                 }
             ),
             corrected,
-            approved_reply_review(corrected),
-            approved_review(corrected),
+            approved_knowledge_review(corrected),
         ]
     )
     response = asyncio.run(
@@ -512,6 +560,18 @@ def test_reply_review_cannot_skip_a_factual_statement() -> None:
     review = approved_reply_review(answer)
     assert not reply_review_issues(review, routing, answer)
     review.facts.pop()
+    assert reply_review_issues(review, routing, answer)
+
+
+@pytest.mark.parametrize("correct_ids", [[0], [0, 0, 1], [0, 2]])
+def test_compact_review_cannot_skip_duplicate_or_invent_blocks(correct_ids: list[int]) -> None:
+    from app.core.use_cases.chat_system import reply_review_issues
+
+    answer = "Thuật toán chọn đỉnh có nhãn nhỏ nhất. Cạnh âm có thể giảm khoảng cách."
+    routing = RoutingDecision(route=ChatRoute.KNOWLEDGE, requirements=["Explain the algorithm"])
+    review = approved_knowledge_review(answer)
+    assert not reply_review_issues(review, routing, answer)
+    review.correct_block_ids = correct_ids
     assert reply_review_issues(review, routing, answer)
 
 
