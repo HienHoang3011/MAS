@@ -13,9 +13,11 @@ MAS là dịch vụ FastAPI cho ứng dụng học lý thuyết đồ thị. Cli
 ```mermaid
 flowchart TD
     A[Client gửi POST /v1/chat] --> B[Tải phiên, 10 tin gần nhất và tối đa 5 tóm tắt]
-    B --> C[Agent định tuyến yêu cầu]
-    C -->|Trò chuyện| E[Tạo bản nháp]
-    C -->|Hỏi bài hoặc lý thuyết| D[BGE-M3 truy xuất giáo trình trong MongoDB]
+    B --> C[Agent định tuyến và nhận diện câu đơn giản]
+    C -->|Câu đơn giản, auto| I[Trả lời ngay trong một lần gọi LLM]
+    I --> G
+    C -->|Trò chuyện cần xử lý đầy đủ| E[Tạo bản nháp]
+    C -->|Hỏi bài hoặc lý thuyết cần nguồn| D[BGE-M3 truy xuất giáo trình trong MongoDB]
     D --> E
     E --> F[Agent kiểm tra nội dung và giới hạn hướng dẫn]
     F -->|Chưa đạt, còn lượt thử| E
@@ -104,7 +106,19 @@ Input gồm `content`, `user_id` tùy chọn và `session_id` tùy chọn:
 - Có cả hai ID: tiếp tục đúng phiên; trả 404 nếu phiên không thuộc người dùng.
 - Muốn mở phiên mới cho người dùng đã có: `POST /v1/chat/sessions` với `{"user_id":"student-01"}`.
 
-Response có `user_id`, `session_id`, `route` (`conversation`, `tutoring`, `knowledge`), `answer`, `sources`, `summary_pending`. `sources` chỉ chứa ID, tên nguồn và điểm tương đồng; không trả nguyên văn đoạn giáo trình có thể chứa đáp án.
+Mặc định `mode=auto`: agent nhận diện câu hỏi trong một lần gọi LLM. Với hội thoại thông thường hoặc định nghĩa đơn giản không cần giáo trình, agent trả lời ngay theo nhánh nhanh. Bài tập, chứng minh, câu hỏi nhiều ý hoặc câu cần căn cứ giáo trình đi qua luồng đầy đủ. Client không cần gửi `mode` để sử dụng cách này.
+
+Có thể ghi đè bằng `mode=standard` để luôn truy xuất/kiểm tra, hoặc `mode=fast` để luôn gọi LLM trực tiếp một lần:
+
+```bash
+curl -X POST http://127.0.0.1:2003/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"Vì sao Dijkstra cần trọng số không âm?","mode":"fast"}'
+```
+
+Nhánh nhanh vẫn dùng lịch sử và bộ nhớ của phiên, với thinking tắt trên proxy Qwen. Response có `route=direct` và `sources=[]`. Nhánh này không truy xuất giáo trình hoặc chạy các agent kiểm tra, nên câu trả lời có thể thiếu căn cứ hoặc vi phạm giới hạn hướng dẫn bài tập; dùng `standard` khi cần các kiểm tra đó.
+
+Response có `user_id`, `session_id`, `route` (`conversation`, `tutoring`, `knowledge` hoặc `direct` trong chế độ nhanh), `answer`, `sources`, `summary_pending`. `sources` chỉ chứa ID, tên nguồn và điểm tương đồng; không trả nguyên văn đoạn giáo trình có thể chứa đáp án.
 
 Tiếp tục phiên bằng hai ID đã nhận:
 
@@ -116,7 +130,7 @@ curl -X POST http://127.0.0.1:2003/v1/chat \
 
 ### Câu hỏi mẫu để thử
 
-Sau khi đánh chỉ mục giáo trình, có thể thay nội dung `content` trong lệnh `curl` ở trên bằng các câu sau. `route` là hướng xử lý dự kiến; hãy xem cả chất lượng `answer` và `sources`, không chỉ mã HTTP.
+Sau khi đánh chỉ mục giáo trình, có thể thay nội dung `content` trong lệnh `curl` ở trên bằng các câu sau. Bảng route dự kiến áp dụng khi gửi `mode=standard`; với mặc định `auto`, câu đơn giản có thể trả `route=direct` và `sources=[]`. Hãy xem cả chất lượng `answer` và `sources`, không chỉ mã HTTP.
 
 | Câu hỏi | Route dự kiến | Điều cần kiểm tra |
 | --- | --- | --- |

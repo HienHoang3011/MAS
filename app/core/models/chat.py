@@ -14,6 +14,7 @@ class ChatRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     content: str = Field(min_length=1, max_length=12000)
+    mode: Literal["auto", "standard", "fast"] = "auto"
     user_id: str | None = Field(default=None, min_length=1, max_length=128)
     session_id: str | None = Field(default=None, min_length=1, max_length=128)
 
@@ -25,6 +26,7 @@ class ChatRequest(BaseModel):
 
 
 class ChatRoute(StrEnum):
+    DIRECT = "direct"
     CONVERSATION = "conversation"
     TUTORING = "tutoring"
     KNOWLEDGE = "knowledge"
@@ -33,10 +35,12 @@ class ChatRoute(StrEnum):
 class RoutingDecision(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    route: ChatRoute
+    route: Literal[ChatRoute.CONVERSATION, ChatRoute.TUTORING, ChatRoute.KNOWLEDGE]
+    use_fast: bool = False
+    fast_answer: str | None = Field(default=None, max_length=3000)
     retrieval_query: str = Field(default="", max_length=2000)
     requirements: list[Annotated[str, Field(min_length=1, max_length=1000)]] = Field(
-        min_length=1, max_length=8
+        default_factory=list, max_length=8
     )
 
 

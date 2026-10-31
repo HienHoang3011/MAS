@@ -1,6 +1,6 @@
 # Bộ câu hỏi thử API lý thuyết đồ thị
 
-Gửi từng câu vào trường `content` của `POST /v1/chat` sau khi đã đánh chỉ mục giáo trình. Cột **route dự kiến** giúp kiểm tra định tuyến, không phải kết quả được mã hóa cứng. Với câu lý thuyết, xem `answer` có giải thích đúng và `sources` có nguồn phù hợp. Với bài tập, agent cần hướng dẫn cách làm và bước tiếp theo, không đưa đáp án cuối.
+Gửi từng câu vào trường `content` của `POST /v1/chat` sau khi đã đánh chỉ mục giáo trình. Để kiểm tra **route và nguồn** theo bảng, gửi thêm `"mode":"standard"`. Nếu bỏ `mode`, hệ thống tự nhận diện; câu đơn giản có thể trả `route=direct`, `sources=[]` để giảm độ trễ. Với câu lý thuyết ở chế độ chuẩn, xem `answer` có giải thích đúng và `sources` có nguồn phù hợp. Với bài tập, agent cần hướng dẫn cách làm và bước tiếp theo, không đưa đáp án cuối.
 
 ## Khái niệm và tính chất
 

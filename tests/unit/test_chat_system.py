@@ -116,6 +116,77 @@ def test_chat_skips_retrieval_for_casual_conversation() -> None:
     store.commit_turn.assert_awaited_once()
 
 
+def test_fast_chat_calls_only_generation_and_saves_the_turn() -> None:
+    store, retriever = dependencies()
+    llm = ScriptedLLM(["Hãy bắt đầu bằng cách xác định các đỉnh kề của A."])
+    response = asyncio.run(
+        ChatSystem(llm, store, retriever).chat(
+            ChatRequest(content="Hướng dẫn mình làm BFS", mode="fast")
+        )
+    )
+    assert response.route == ChatRoute.DIRECT
+    assert response.sources == []
+    assert response.answer == "Hãy bắt đầu bằng cách xác định các đỉnh kề của A."
+    assert len(llm.inputs) == 1
+    assert llm.inputs[0]["content"] == "Hướng dẫn mình làm BFS"
+    retriever.search.assert_not_called()
+    store.commit_turn.assert_awaited_once_with(
+        store.resolve_session.return_value,
+        "Hướng dẫn mình làm BFS",
+        response.answer,
+    )
+
+
+def test_auto_chat_answers_simple_question_in_one_llm_call() -> None:
+    store, retriever = dependencies()
+    llm = ScriptedLLM(
+        [
+            RoutingDecision(
+                route=ChatRoute.CONVERSATION,
+                requirements=[],
+                use_fast=True,
+                fast_answer="Chào bạn!",
+            )
+        ]
+    )
+    response = asyncio.run(ChatSystem(llm, store, retriever).chat(ChatRequest(content="Xin chào")))
+    assert response.route == ChatRoute.DIRECT
+    assert response.answer == "Chào bạn!"
+    assert len(llm.inputs) == 1
+    retriever.search.assert_not_called()
+    store.commit_turn.assert_awaited_once()
+
+
+def test_auto_chat_keeps_exercise_in_reviewed_flow() -> None:
+    store, retriever = dependencies()
+    answer = "Hãy bắt đầu bằng cách đếm bậc từng đỉnh."
+    llm = ScriptedLLM(
+        [
+            RoutingDecision(
+                route=ChatRoute.TUTORING,
+                requirements=["Give a hint"],
+                use_fast=True,
+                fast_answer="Đáp án cuối.",
+            ),
+            answer,
+            approved_reply_review(answer),
+            approved_review(answer),
+        ]
+    )
+    response = asyncio.run(
+        ChatSystem(llm, store, retriever).chat(ChatRequest(content="Giải bài đồ thị này"))
+    )
+    assert response.route == ChatRoute.TUTORING
+    assert response.answer == answer
+    assert len(llm.inputs) == 4
+    retriever.search.assert_awaited_once()
+
+
+def test_router_cannot_select_direct_mode() -> None:
+    with pytest.raises(ValidationError):
+        RoutingDecision(route=ChatRoute.DIRECT, requirements=["Respond"])
+
+
 def test_tutoring_rewrites_a_leaked_answer_before_saving() -> None:
     store, retriever = dependencies()
     retriever.search.return_value = [
@@ -229,6 +300,7 @@ def test_invalid_summary_stops_retries_without_advancing_memory() -> None:
         {"content": "  "},
         {"content": "hello", "user_id": ""},
         {"content": "hello", "session_id": "session"},
+        {"content": "hello", "mode": "unknown"},
     ],
 )
 def test_invalid_chat_identity_or_content_is_rejected(payload: dict[str, str]) -> None:
